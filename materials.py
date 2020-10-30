@@ -1,186 +1,216 @@
-# Доступ к ноде внутри материала при написании скрипта: bpy.context.view_layer.objects.active.material_slots[0].material.node_tree.nodes[3].name
-
-
 import bpy
+import numbers
 import os
+from node.texture_node import TextureNode
+
+MAT_TYPES = [
+    "Principled BSDF",
+    "Diffuse BSDF",
+    "Mix Shader"
+]
+# int TU_DIFFUSE
+# int TU_ALBEDOBUFFER
+# int TU_NORMAL
+# int TU_NORMALBUFFER
+# int TU_SPECULAR
+# int TU_EMISSIVE
+# int TU_ENVIRONMENT
+NAME_ORDER = [
+    "Diffuse",
+    "Specular",
+    "Normal",
+    "Emissive",
+]
+NAME_MAPPING = {
+    "Base Color" : "Diffuse",
+    "Emission" : "Emissive",
+    "Normal" : "Normal",
+    "Specular": "Specular"
+}
+NAME_MAPPING_SHORT = {
+    "Diffuse" : "Diff",
+    "Emissive" : "Emissive",
+    "Specular" : "Spec"
+}
 
 
-def find_group(material: bpy.types.Material, name: str) -> bpy.types.ShaderNodeGroup:
-    for node in material.node_tree.nodes:
-        if type(node) is bpy.types.ShaderNodeGroup and node.node_tree.name == name:
-            return node
-    return None
+# <material>
+# 	 <technique name="Techniques/DiffUnlitAlphaGlow.xml" />
+# 	 <parameter name="MatDiffColor" value="1 1 1 1"/>
+#      <textures>
+#          <TU_DIFFUSE>arcade.png</TU_DIFFUSE>
+#      </textures>
+# 	 <cull value="none" />
+# </material>
 
 
-def write_material(material_name: str, result_file_path: str):
-    material: bpy.types.Material = bpy.data.materials[material_name]
-    
-    group: bpy.types.ShaderNodeGroup
+class Material():
+    def __init__(self, bpy_mat, cache):
+        self.cache = cache
+        self.mat = bpy_mat
+        self.hasAlpha = False
+        self.filename = None
+        self.isSerialized = False
 
-    group = find_group(material, "Unlit")
-    if group is not None:
-        write_unlit_material(group, result_file_path)
-        return
+        self.surfaceName = None
 
-    group = find_group(material, "LitSolid")
-    if group is not None:
-        write_litsolid_material(group, result_file_path)
-        return
-
-    raise Exception("Unknown material type")
-
-
-def write_unlit_material(group: bpy.types.ShaderNodeGroup, result_file_path:str):
-    diff_rgb: bpy.types.Color = group.inputs['MatDiffColor.rgb (float3)'].default_value
-    diff_a: float = group.inputs['MatDiffColor.a (float)'].default_value
-    diffmap: bool = group.inputs['DIFFMAP (bool)'].default_value
-
-    diff_map_name: str = "Unknown"
-    if group.inputs['DiffMap.rgb (float3) (unit="diffuse")'].is_linked:
-        diff_map_name = bpy.context.scene.urho_exportsettings.texturesPath + "/" + group.inputs['DiffMap.rgb (float3) (unit="diffuse")'].links[0].from_node.image.name
-
-    vertexcolor: bool = group.inputs['VERTEXCOLOR (bool)'].default_value
-    alphamask: bool = group.inputs['ALPHAMASK (bool)'].default_value
-    alpha_blending: bool = group.inputs['ALPHA BLENDING (bool)'].default_value
-    two_sided: bool = group.inputs['TWO SIDED (bool)'].default_value
-
-    technique: str
-    if diffmap:
-        technique = "Diff"
-    else:
-        technique = "NoTexture"
-    
-    if vertexcolor:
-        technique += "VCol"
-    
-    technique += "Unlit"
-    
-    if alpha_blending:
-        technique += "Alpha"
-
-    result: str = (
-        '<material>\n'
-        f'    <technique name="Techniques/{technique}.xml" />\n'
-    )
-
-    if diff_rgb[0] != 1.0 or diff_rgb[1] != 1.0 or diff_rgb[2] != 1.0 or diff_a != 1.0:
-        result += f'    <parameter name="MatDiffColor" value="{diff_rgb[0]} {diff_rgb[1]} {diff_rgb[2]} {diff_a}" />\n'
-
-    if diffmap:
-        result += f'    <texture unit="diffuse" name="{diff_map_name}" />\n'
-    
-    if alphamask:
-        result += '    <shader psdefines="ALPHAMASK" />\n'
-
-    if two_sided:
-        result += (
-            '    <cull value="none" />\n'
-            '    <shadowcull value="none" />\n'
-        )
-
-    result += '</material>'
-    
-    with open(result_file_path, "w") as text_file:
-        text_file.write(result)
+    def getBlendMethod(self): #urho3d blend method
+        blend_method = self.mat.blend_method
+        if blend_method == "OPAQUE":
+            return None
+        elif blend_method == "CLIP":
+            return "AlphaMask"
+        else:
+            return "Alpha"
+            #trasparent
 
 
-def write_litsolid_material(group: bpy.types.ShaderNodeGroup, result_file_path:str):
-    diff_rgb: bpy.types.Color = group.inputs['MatDiffColor.rgb (float3)'].default_value
-    diff_a: float = group.inputs['MatDiffColor.a (float)'].default_value
-    diffmap: bool = group.inputs['DIFFMAP (bool)'].default_value
+    def getNodeFromLink(self, dif, socket):
+        try:
+            #Get the link that input to 'dif' and 'socket'
+            link = next( link for link in self.mat.node_tree.links if link.to_node == dif and link.to_socket == socket )
+            return link.from_node
 
-    diff_map_name: str = "Unknown"
-    if group.inputs['DiffMap.rgb (float3) (unit="diffuse")'].is_linked:
-        diff_map_name = bpy.context.scene.urho_exportsettings.texturesPath + "/" + group.inputs['DiffMap.rgb (float3) (unit="diffuse")'].links[0].from_node.image.name
+        except:
+            return None
 
-    vertexcolor: bool = group.inputs['VERTEXCOLOR (bool)'].default_value
-    spec_rgb: bpy.types.Color = group.inputs['MatSpecColor.rgb (float3)'].default_value
-    spec_a: float = group.inputs['MatSpecColor.a (float) (specularPower)'].default_value
-    specmap: bool = group.inputs['SPECMAP (bool)'].default_value
+    def getName(self):
+        return self.mat.name
 
-    spec_map_name: str = "Unknown"
-    if group.inputs['SpecMap.rgb (float3) (unit="specular")'].is_linked:
-        spec_map_name = bpy.context.scene.urho_exportsettings.texturesPath + "/" + group.inputs['SpecMap.rgb (float3) (unit="specular")'].links[0].from_node.image.name
+    def parse(self):
+        textures = {}
+        colors = {}
 
-    emis_rgb: bpy.types.Color = group.inputs['MatEmissiveColor.rgb (float3)'].default_value
-    emissivemap: bool = group.inputs['EMISSIVEMAP (bool)'].default_value
+        #print("--- nodes for " + self.mat.name + " ---")
+        material_node = None
+        for name,node in self.mat.node_tree.nodes.items():
+            if name in MAT_TYPES:
+                material_node = node
+                self.surfaceName = name
+        if material_node:
+            inputs = material_node.inputs
+            if self.surfaceName == "Mix Shader":
+                fac = inputs["Fac"]
+                link = fac.links[0]
+                node = link.from_node #ShaderNodeTexImage
+                textures["Diffuse"] = TextureNode(node, self.cache)
+                self.hasAlpha = True
+                self.isUnlit = True
+            else:
+                #print("- inputs -")
+                #for name, model in inputs.items():
+                #    print(name,model)
+                #print("- -")
+                for input_name,remaped_name in NAME_MAPPING.items():
+                    target = inputs.get(input_name)
+                    if target:
+                        node = self.getNodeFromLink(material_node,target)
+                        if isinstance(node, bpy.types.ShaderNodeTexImage):
+                            textures[remaped_name] = TextureNode(node, self.cache)
+                        else:
+                            colors[remaped_name] = inputs[input_name].default_value
 
-    emis_map_name: str = "Unknown"
-    if group.inputs['EmissiveMap.rgb (float3) (unit="emissive")'].is_linked:
-        emis_map_name = bpy.context.scene.urho_exportsettings.texturesPath + "/" + group.inputs['EmissiveMap.rgb (float3) (unit="emissive")'].links[0].from_node.image.name
+                node = self.getNodeFromLink(material_node,inputs["Alpha"])
+                if isinstance(node, bpy.types.ShaderNodeTexImage):
+                    self.hasAlpha = True
+                self.isUnlit = self.mat.shadow_method == "NONE"
 
-    normalmap: bool = group.inputs['NORMALMAP (bool)'].default_value
 
-    normal_map_name: str = "Unknown"
-    if group.inputs['NormalMap.rgb (float3) (unit="normal")'].is_linked:
-        normal_map_name = bpy.context.scene.urho_exportsettings.texturesPath + "/" + group.inputs['NormalMap.rgb (float3) (unit="normal")'].links[0].from_node.image.name
+        self.textures = textures
+        self.colors = colors
 
-    translucent: bool = group.inputs['TRANSLUCENT (bool)'].default_value
-    alphamask: bool = group.inputs['ALPHAMASK (bool)'].default_value
-    alpha_blending: bool = group.inputs['ALPHA BLENDING (bool)'].default_value
-    two_sided: bool = group.inputs['TWO SIDED (bool)'].default_value
-    
-    technique: str
-    if diffmap:
-        technique = "Diff"
-    else:
-        technique = "NoTexture"
+        self.surfaceName == "Mix Shader"
+        self.ambientOcclusion = False
 
-    if vertexcolor:
-        technique += "VCol"
+    def getTechniqueName(self):
+        technique = ""
 
-    if normalmap:
-        technique += "Normal"
+        if "Diffuse" in self.textures:
+            technique = "Diff"
+            if not self.isUnlit:
+                if "Normal" in self.textures:
+                    technique = technique + "Normal"
+                    if "Specular" in self.textures:
+                        technique = technique + "Spec"
+                elif "Specular" in self.textures:
+                    technique = technique + "Spec"
+        else:
+            technique = "NoTexture"
 
-    if specmap:
-        technique += "Spec"
+        if self.isUnlit:
+            technique = technique + "Unlit"
+        elif self.ambientOcclusion:
+            technique = technique + "AO"
 
-    if emissivemap:
-        technique += "Emissive"
-    
-    if alpha_blending:
-        technique += "Alpha"
 
-    if translucent:
-        technique += "Translucent"
+        if self.hasAlpha:
+            technique = technique + self.getBlendMethod()
 
-    result: str = (
-        '<material>\n'
-        f'    <technique name="Techniques/{technique}.xml" />\n'
-    )
 
-    if diff_rgb[0] != 1.0 or diff_rgb[1] != 1.0 or diff_rgb[2] != 1.0 or diff_a != 1.0:
-        result += f'    <parameter name="MatDiffColor" value="{diff_rgb[0]} {diff_rgb[1]} {diff_rgb[2]} {diff_a}" />\n'
-    
-    if diffmap:
-        result += f'    <texture unit="diffuse" name="{diff_map_name}" />\n'
+        return technique
 
-    if spec_rgb[0] != 0.0 or spec_rgb[1] != 0.0 or spec_rgb[2] != 0.0 or spec_a != 1.0:
-        result += f'    <parameter name="MatSpecColor" value="{spec_rgb[0]} {spec_rgb[1]} {spec_rgb[2]} {spec_a}" />\n'
+    def convertColorToString(self, color):
+        if isinstance(color, numbers.Number):
+            color = [color,color,color,1]
 
-    if specmap:
-        result += f'    <texture unit="specular" name="{spec_map_name}" />\n'
+        return " ".join(str(v) for v in color)
 
-    if emis_rgb[0] != 0.0 or emis_rgb[1] != 0.0 or emis_rgb[2] != 0.0:
-        result += f'    <parameter name="MatEmissiveColor" value="{emis_rgb[0]} {emis_rgb[1]} {emis_rgb[2]}" />\n'
+    def getRelativeFileName(self):
+        dir = self.cache.relative_paths["materials"]
+        return dir + "/" + self.filename
 
-    if emissivemap:
-        result += f'    <texture unit="emissive" name="{emis_map_name}" />\n'
+    def serialize(self):
+        if self.isSerialized:
+            return
+        print("serializing material: ",self.getName())
+        self.isSerialized = True
+        self.parse()
 
-    if normalmap:
-        result += f'    <texture unit="normal" name="{normal_map_name}" />\n'
-    
-    if alphamask:
-        result += '    <shader psdefines="ALPHAMASK" />\n'
+        out = []
+        out.append("<?xml version=\"1.0\"?>")
+        out.append("<material>")
+        out.append("	 <technique name=\"Techniques/"+self.getTechniqueName()+".xml\" />")
 
-    if two_sided:
-        result += (
-            '    <cull value="none" />\n'
-            '    <shadowcull value="none" />\n'
-        )
+        if not ("Diffuse" in self.colors):
+            out.append("	 <parameter name=\"MatDiffColor\" value=\"1 1 1 1\"/>")
+        for full_name in NAME_ORDER:
+            #print(full_name)
+            #found in colors and in short name mapping, cuz if its not then dont bother.
+            if full_name in self.colors and full_name in NAME_MAPPING_SHORT:
+                #print(full_name)
+                #for name,color in self.colors.items():
+                #    print(name,color)
+                color = self.colors[full_name]
+                name = NAME_MAPPING_SHORT[full_name]
+                color = self.convertColorToString(color)
+                out.append("	 <parameter name=\"Mat"+name+"Color\" value=\""+color+"\"/>")
 
-    result += '</material>'
-    
-    with open(result_file_path, "w") as text_file:
-        text_file.write(result)
 
+
+        if self.cache.exportSettings["Textures"]:
+            out.append("     <textures>")
+
+            for name in NAME_ORDER:
+                if name in self.textures:
+                    textureNode = self.textures[name]
+                    unit = "TU_"+name.upper()
+                    path = textureNode.getRelativePath()
+                    out.append("        <" + unit + ">" + path + "</" + unit + ">")
+                    textureNode.save()
+
+
+            out.append("     </textures>")
+
+        #out.append("	 <cull value=\"none\" />")
+        out.append("</material>")
+
+        dir = self.cache.absolute_paths["materials"]
+        name = self.mat.name + ".xml"
+        fname = dir +  "/" + name
+
+        self.filename = name
+
+        with open(fname, "w") as f:
+            f.write("\n".join(out))
+
+        return out
